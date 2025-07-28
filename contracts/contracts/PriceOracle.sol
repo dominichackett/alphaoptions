@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 // Chainlink interface
 interface AggregatorV3Interface {
@@ -27,10 +28,19 @@ interface AggregatorV3Interface {
     );
 }
 
+// Custom oracle interface for non-Chainlink sources
+interface ICustomOracle {
+    function getPrice() external view returns (uint256 price, uint256 updatedAt);
+    function getLatestPrice() external view returns (uint256);
+    function decimals() external view returns (uint8);
+}
+
 /**
  * @title PriceOracle
  * @dev Multi-source price aggregation system for crypto, forex, and stock assets
  * Enables 24/7 pricing with manipulation protection and redundancy
+ * 
+ * KEY FEATURE: Enables 24/7 stock options trading - your competitive advantage!
  */
 contract PriceOracle is ReentrancyGuard, AccessControl, Pausable {
     using Math for uint256;
@@ -175,6 +185,13 @@ contract PriceOracle is ReentrancyGuard, AccessControl, Pausable {
         uint256 assetsUpdated
     );
 
+    event SyntheticStockPriceUpdated(
+        string indexed stockSymbol,
+        uint256 price,
+        bool isMarketHours,
+        uint256 confidence
+    );
+
     // ============ Modifiers ============
     
     modifier validAsset(string memory asset) {
@@ -297,22 +314,173 @@ contract PriceOracle is ReentrancyGuard, AccessControl, Pausable {
         }
     }
 
+    // ============ Market Hours Functions ============
+    
     /**
-     * @dev Force update all supported assets (keeper function)
+     * @dev Checks if market is currently open for an asset
+     * @param asset Asset symbol
+     * @return isOpen Whether market is currently open
      */
-    function updateAllPrices() external onlyPriceKeeper nonReentrant whenNotPaused {
-        uint256 updatedCount = 0;
+    function isMarketOpen(string memory asset) external view validAsset(asset) returns (bool) {
+        MarketHours memory marketConfig = marketHours[asset];
         
-        for (uint256 i = 0; i < supportedAssets.length; i++) {
-            string memory asset = supportedAssets[i];
-            if (!emergencyMode && !assetEmergencyMode[asset]) {
-                _updateAssetPrice(asset);
-                updatedCount++;
-            }
+        if (marketConfig.isAlwaysOpen) {
+            return true; // 24/7 markets (crypto)
         }
         
-        if (keeperReward > 0 && updatedCount > 0) {
-            _payKeeperReward(msg.sender, updatedCount);
+        // Get current day of week (0 = Sunday)
+        uint256 dayOfWeek = (block.timestamp / 1 days + 4) % 7;
+        
+        if (!marketConfig.tradingDays[dayOfWeek]) {
+            return false; // Market closed today
+        }
+        
+        // Get current time of day in seconds
+        uint256 timeOfDay = block.timestamp % 1 days;
+        
+        return timeOfDay >= marketConfig.openTime && timeOfDay <= marketConfig.closeTime;
+    }
+
+    /**
+     * @dev Sets market hours for an asset
+     * @param asset Asset symbol
+     * @param openTime Market open time (seconds from midnight UTC)
+     * @param closeTime Market close time (seconds from midnight UTC)
+     * @param tradingDays Array of trading days (0=Sunday, 6=Saturday)
+     * @param isAlwaysOpen Whether market is 24/7
+     * @param timezone Market timezone string
+     */
+    function setMarketHours(
+        string memory asset,
+        uint256 openTime,
+        uint256 closeTime,
+        bool[7] memory tradingDays,
+        bool isAlwaysOpen,
+        string memory timezone
+    ) external onlyRole(OPERATOR_ROLE) validAsset(asset) {
+        require(openTime < 86400 && closeTime < 86400, "Invalid time");
+        require(openTime < closeTime, "Open time must be before close time");
+        
+        marketHours[asset] = MarketHours({
+            openTime: openTime,
+            closeTime: closeTime,
+            tradingDays: tradingDays,
+            isAlwaysOpen: isAlwaysOpen,
+            timezone: timezone
+        });
+    }
+
+    // ============ 24/7 Stock Price Functions - YOUR KILLER FEATURE! ============
+    
+    /**
+     * @dev Special function for 24/7 stock price updates using synthetic pricing
+     * This enables your killer feature: 24/7 stock options trading!
+     * @param stockSymbol Stock symbol (e.g., "AAPL", "TSLA")
+     * @param afterHoursMultiplier Multiplier for after-hours pricing adjustments
+     * @param newsImpactFactor Factor for news-based price adjustments
+     */
+    function update24x7StockPrice(
+        string memory stockSymbol,
+        uint256 afterHoursMultiplier,
+        uint256 newsImpactFactor
+    ) external onlyPriceKeeper validAsset(stockSymbol) {
+        AssetConfig storage config = assetConfigs[stockSymbol];
+        require(config.assetType == AssetType.STOCK, "Not a stock asset");
+        
+        // Get base price from last market close
+        uint256 basePrice = currentPrices[stockSymbol].price;
+        
+        // Apply after-hours adjustments if market is closed
+        bool marketOpen = this.isMarketOpen(stockSymbol);
+        if (!marketOpen) {
+            // Use futures pricing, pre-market indicators, and news sentiment
+            basePrice = _calculateAfterHoursPrice(
+                stockSymbol,
+                basePrice,
+                afterHoursMultiplier,
+                newsImpactFactor
+            );
+        }
+        
+        // Confidence is higher during market hours
+        uint256 confidence = marketOpen ? 9000 : 7000; // Lower confidence after hours
+        
+        // Update with synthetic 24/7 price
+        currentPrices[stockSymbol] = PriceData({
+            price: basePrice,
+            timestamp: block.timestamp,
+            confidence: confidence,
+            status: PriceStatus.ACTIVE,
+            sourceCount: 1,
+            deviation: 0
+        });
+        
+        _updatePriceHistory(stockSymbol, basePrice);
+        
+        emit PriceUpdated(
+            stockSymbol,
+            basePrice,
+            block.timestamp,
+            confidence,
+            1
+        );
+        
+        emit SyntheticStockPriceUpdated(
+            stockSymbol,
+            basePrice,
+            marketOpen,
+            confidence
+        );
+    }
+
+    /**
+     * @dev Gets synthetic stock price with market status
+     * @param stockSymbol Stock symbol
+     * @return price Current synthetic price
+     * @return isMarketHours Whether market is in trading hours
+     * @return confidence Price confidence level
+     */
+    function getSyntheticStockPrice(string memory stockSymbol) 
+        external 
+        view 
+        validAsset(stockSymbol) 
+        returns (uint256 price, bool isMarketHours, uint256 confidence) 
+    {
+        require(assetConfigs[stockSymbol].assetType == AssetType.STOCK, "Not a stock");
+        
+        PriceData memory priceData = currentPrices[stockSymbol];
+        bool marketOpen = this.isMarketOpen(stockSymbol);
+        
+        return (priceData.price, marketOpen, priceData.confidence);
+    }
+
+    /**
+     * @dev Batch update for multiple stock prices with synthetic pricing
+     * @param stockSymbols Array of stock symbols
+     * @param afterHoursMultipliers Array of after-hours multipliers
+     * @param newsImpactFactors Array of news impact factors
+     */
+    function batchUpdate24x7StockPrices(
+        string[] memory stockSymbols,
+        uint256[] memory afterHoursMultipliers,
+        uint256[] memory newsImpactFactors
+    ) external onlyPriceKeeper {
+        require(
+            stockSymbols.length == afterHoursMultipliers.length &&
+            stockSymbols.length == newsImpactFactors.length,
+            "Array length mismatch"
+        );
+        
+        for (uint256 i = 0; i < stockSymbols.length; i++) {
+            if (assetExists[stockSymbols[i]] && 
+                assetConfigs[stockSymbols[i]].assetType == AssetType.STOCK) {
+                
+                this.update24x7StockPrice(
+                    stockSymbols[i],
+                    afterHoursMultipliers[i],
+                    newsImpactFactors[i]
+                );
+            }
         }
     }
 
@@ -402,91 +570,326 @@ contract PriceOracle is ReentrancyGuard, AccessControl, Pausable {
         emit SourceAdded(asset, sourceAddress, sourceType, weight);
     }
 
-    /**
-     * @dev Removes a price source
-     * @param asset Asset symbol
-     * @param sourceAddress Source address to remove
-     */
-    function removePriceSource(string memory asset, address sourceAddress) 
-        external 
-        onlyRole(OPERATOR_ROLE) 
-        validAsset(asset) 
-    {
-        AssetConfig storage config = assetConfigs[asset];
-        uint256 sourceIdx = config.sourceIndex[sourceAddress];
-        require(sourceIdx > 0, "Source not found");
-        
-        // Convert to 0-based index
-        sourceIdx--;
-        
-        // Remove from array by swapping with last element
-        uint256 lastIdx = config.sources.length - 1;
-        if (sourceIdx != lastIdx) {
-            config.sources[sourceIdx] = config.sources[lastIdx];
-            // Update index mapping for moved element
-            config.sourceIndex[config.sources[sourceIdx].sourceAddress] = sourceIdx + 1;
-        }
-        
-        config.sources.pop();
-        delete config.sourceIndex[sourceAddress];
-        
-        emit SourceRemoved(asset, sourceAddress);
-    }
-
-    // ============ Market Hours Functions ============
+    // ============ Internal Functions ============
     
-    /**
-     * @dev Checks if market is currently open for an asset
-     * @param asset Asset symbol
-     * @return isOpen Whether market is currently open
-     */
-    function isMarketOpen(string memory asset) external view validAsset(asset) returns (bool) {
-        MarketHours memory hours = marketHours[asset];
+    function _updateAssetPrice(string memory asset) internal {
+        AssetConfig storage config = assetConfigs[asset];
+        require(config.isActive, "Asset not active");
         
-        if (hours.isAlwaysOpen) {
-            return true; // 24/7 markets (crypto)
+        // Collect prices from all active sources
+        uint256[] memory prices = new uint256[](config.sources.length);
+        uint256[] memory weights = new uint256[](config.sources.length);
+        uint256 validSourceCount = 0;
+        uint256 totalWeight = 0;
+        
+        for (uint256 i = 0; i < config.sources.length; i++) {
+            PriceSource storage source = config.sources[i];
+            
+            if (!source.isActive) continue;
+            
+            (bool success, uint256 price, uint256 updatedAt) = _fetchPriceFromSource(source);
+            
+            if (success && block.timestamp - updatedAt <= source.maxStaleness) {
+                prices[validSourceCount] = price;
+                weights[validSourceCount] = source.weight;
+                totalWeight += source.weight;
+                validSourceCount++;
+                
+                // Update source data
+                source.lastPrice = int256(price);
+                source.lastUpdateTime = updatedAt;
+            }
         }
         
-        // Get current day of week (0 = Sunday)
-        uint256 dayOfWeek = (block.timestamp / 1 days + 4) % 7;
+        require(validSourceCount >= config.minSources, "Insufficient valid sources");
         
-        if (!hours.tradingDays[dayOfWeek]) {
-            return false; // Market closed today
-        }
+        // Calculate aggregated price
+        AggregatedPrice memory aggregated = _calculateAggregatedPrice(
+            prices,
+            weights,
+            validSourceCount,
+            totalWeight
+        );
         
-        // Get current time of day in seconds
-        uint256 timeOfDay = block.timestamp % 1 days;
+        // Validate price against previous value and deviation limits
+        _validatePrice(asset, aggregated.weightedPrice, config.maxDeviation);
         
-        return timeOfDay >= hours.openTime && timeOfDay <= hours.closeTime;
+        // Calculate confidence score
+        uint256 confidence = _calculateConfidence(validSourceCount, config.sources.length, aggregated);
+        
+        // Update current price
+        currentPrices[asset] = PriceData({
+            price: aggregated.weightedPrice,
+            timestamp: block.timestamp,
+            confidence: confidence,
+            status: PriceStatus.ACTIVE,
+            sourceCount: validSourceCount,
+            deviation: _calculateDeviation(aggregated.minPrice, aggregated.maxPrice)
+        });
+        
+        // Store aggregated data
+        aggregatedPrices[asset] = aggregated;
+        
+        // Update price history
+        _updatePriceHistory(asset, aggregated.weightedPrice);
+        
+        emit PriceUpdated(
+            asset,
+            aggregated.weightedPrice,
+            block.timestamp,
+            confidence,
+            validSourceCount
+        );
     }
 
-    /**
-     * @dev Sets market hours for an asset
-     * @param asset Asset symbol
-     * @param openTime Market open time (seconds from midnight UTC)
-     * @param closeTime Market close time (seconds from midnight UTC)
-     * @param tradingDays Array of trading days (0=Sunday, 6=Saturday)
-     * @param isAlwaysOpen Whether market is 24/7
-     * @param timezone Market timezone string
-     */
-    function setMarketHours(
-        string memory asset,
-        uint256 openTime,
-        uint256 closeTime,
-        bool[7] memory tradingDays,
-        bool isAlwaysOpen,
-        string memory timezone
-    ) external onlyRole(OPERATOR_ROLE) validAsset(asset) {
-        require(openTime < 86400 && closeTime < 86400, "Invalid time");
-        require(openTime < closeTime, "Open time must be before close time");
+    function _fetchPriceFromSource(PriceSource memory source) 
+        internal 
+        view 
+        returns (bool success, uint256 price, uint256 updatedAt) 
+    {
+        if (source.sourceType == SourceType.CHAINLINK) {
+            return _fetchChainlinkPrice(source);
+        } else if (source.sourceType == SourceType.CUSTOM) {
+            return _fetchCustomPrice(source);
+        }
+        // Add other source types as needed
         
-        marketHours[asset] = MarketHours({
-            openTime: openTime,
-            closeTime: closeTime,
-            tradingDays: tradingDays,
-            isAlwaysOpen: isAlwaysOpen,
-            timezone: timezone
+        return (false, 0, 0);
+    }
+
+    function _fetchChainlinkPrice(PriceSource memory source) 
+        internal 
+        view 
+        returns (bool success, uint256 price, uint256 updatedAt) 
+    {
+        try AggregatorV3Interface(source.sourceAddress).latestRoundData() returns (
+            uint80,
+            int256 answer,
+            uint256,
+            uint256 _updatedAt,
+            uint80
+        ) {
+            if (answer > 0) {
+                // Convert to 18 decimals
+                uint256 normalizedPrice = uint256(answer) * (10 ** (18 - source.decimals));
+                return (true, normalizedPrice, _updatedAt);
+            }
+        } catch {
+            return (false, 0, 0);
+        }
+        
+        return (false, 0, 0);
+    }
+
+    function _fetchCustomPrice(PriceSource memory source) 
+        internal 
+        view 
+        returns (bool success, uint256 price, uint256 updatedAt) 
+    {
+        // Fixed: Use interface-based approach instead of low-level call
+        try ICustomOracle(source.sourceAddress).getPrice() returns (
+            uint256 _price, 
+            uint256 _updatedAt
+        ) {
+            if (_price > 0) {
+                uint256 normalizedPrice = _price * (10 ** (18 - source.decimals));
+                return (true, normalizedPrice, _updatedAt);
+            }
+        } catch {
+            // Fallback to getLatestPrice if getPrice doesn't exist
+            try ICustomOracle(source.sourceAddress).getLatestPrice() returns (uint256 _price) {
+                if (_price > 0) {
+                    uint256 normalizedPrice = _price * (10 ** (18 - source.decimals));
+                    return (true, normalizedPrice, block.timestamp);
+                }
+            } catch {
+                return (false, 0, 0);
+            }
+        }
+        
+        return (false, 0, 0);
+    }
+
+    function _calculateAggregatedPrice(
+        uint256[] memory prices,
+        uint256[] memory weights,
+        uint256 validCount,
+        uint256 totalWeight
+    ) internal view returns (AggregatedPrice memory) {
+        require(validCount > 0, "No valid prices");
+        
+        // Calculate weighted average
+        uint256 weightedSum = 0;
+        for (uint256 i = 0; i < validCount; i++) {
+            weightedSum += prices[i] * weights[i];
+        }
+        uint256 weightedPrice = totalWeight > 0 ? weightedSum / totalWeight : 0;
+        
+        // Calculate median
+        uint256[] memory sortedPrices = new uint256[](validCount);
+        for (uint256 i = 0; i < validCount; i++) {
+            sortedPrices[i] = prices[i];
+        }
+        _quickSort(sortedPrices, 0, int256(validCount - 1));
+        
+        uint256 medianPrice;
+        if (validCount % 2 == 0) {
+            medianPrice = (sortedPrices[validCount / 2 - 1] + sortedPrices[validCount / 2]) / 2;
+        } else {
+            medianPrice = sortedPrices[validCount / 2];
+        }
+        
+        // Calculate average
+        uint256 sum = 0;
+        for (uint256 i = 0; i < validCount; i++) {
+            sum += prices[i];
+        }
+        uint256 averagePrice = sum / validCount;
+        
+        // Find min and max
+        uint256 minPrice = sortedPrices[0];
+        uint256 maxPrice = sortedPrices[validCount - 1];
+        
+        return AggregatedPrice({
+            weightedPrice: weightedPrice,
+            medianPrice: medianPrice,
+            averagePrice: averagePrice,
+            minPrice: minPrice,
+            maxPrice: maxPrice,
+            validSources: validCount,
+            totalWeight: totalWeight,
+            lastUpdate: block.timestamp
         });
+    }
+
+    function _validatePrice(string memory asset, uint256 newPrice, uint256 maxDeviation) internal {
+        PriceData memory currentPrice = currentPrices[asset];
+        
+        if (currentPrice.timestamp > 0 && currentPrice.price > 0) {
+            uint256 deviation = _calculateDeviation(currentPrice.price, newPrice);
+            
+            if (deviation > maxDeviation) {
+                emit PriceDeviation(asset, newPrice, currentPrice.price, deviation);
+                
+                // Trigger emergency mode if deviation is extreme
+                if (deviation > emergencyThreshold) {
+                    assetEmergencyMode[asset] = true;
+                    revert("Price deviation too high");
+                }
+            }
+        }
+    }
+
+    function _calculateConfidence(
+        uint256 validSources,
+        uint256 totalSources,
+        AggregatedPrice memory aggregated
+    ) internal pure returns (uint256) {
+        // Base confidence from source availability
+        uint256 sourceConfidence = (validSources * 5000) / totalSources; // Max 50%
+        
+        // Confidence from price consistency
+        uint256 deviation = _calculateDeviation(aggregated.minPrice, aggregated.maxPrice);
+        uint256 consistencyConfidence = deviation < 500 ? 5000 : (5000 - (deviation - 500) * 10); // Max 50%
+        
+        return Math.min(sourceConfidence + consistencyConfidence, 10000);
+    }
+
+    function _calculateDeviation(uint256 price1, uint256 price2) internal pure returns (uint256) {
+        if (price1 == 0 || price2 == 0) return 0;
+        
+        uint256 diff = price1 > price2 ? price1 - price2 : price2 - price1;
+        return (diff * 10000) / Math.max(price1, price2);
+    }
+
+    function _updatePriceHistory(string memory asset, uint256 price) internal {
+        uint256[] storage history = priceHistory[asset];
+        
+        history.push(price);
+        
+        // Keep only last 24 prices
+        if (history.length > 24) {
+            for (uint256 i = 0; i < history.length - 1; i++) {
+                history[i] = history[i + 1];
+            }
+            history.pop();
+        }
+    }
+
+    function _payKeeperReward(address keeper, uint256 assetsUpdated) internal {
+        uint256 reward = keeperReward * assetsUpdated;
+        
+        if (keeperRewardToken != address(0) && reward > 0) {
+            // Pay in ERC20 token
+            IERC20(keeperRewardToken).transfer(keeper, reward);
+        } else if (address(this).balance >= reward) {
+            // Pay in ETH
+            payable(keeper).transfer(reward);
+        }
+        
+        emit KeeperRewardPaid(keeper, reward, assetsUpdated);
+    }
+
+    function _calculateAfterHoursPrice(
+        string memory stockSymbol,
+        uint256 basePrice,
+        uint256 afterHoursMultiplier,
+        uint256 newsImpactFactor
+    ) internal view returns (uint256) {
+        // Start with last market close price
+        uint256 adjustedPrice = basePrice;
+        
+        // Apply after-hours multiplier (typically 0.95-1.05 for normal conditions)
+        adjustedPrice = (adjustedPrice * afterHoursMultiplier) / PRECISION;
+        
+        // Apply news impact factor (could be from external news feeds)
+        adjustedPrice = (adjustedPrice * newsImpactFactor) / PRECISION;
+        
+        // Add some time-based decay to prevent stale pricing
+        uint256 timeSinceUpdate = block.timestamp - currentPrices[stockSymbol].timestamp;
+        if (timeSinceUpdate > 4 hours) {
+            // Gradually reduce confidence and add small random walk
+            uint256 decay = Math.min(timeSinceUpdate / 1 hours, 10); // Max 10% decay
+            adjustedPrice = (adjustedPrice * (100 - decay)) / 100;
+        }
+        
+        // Ensure price doesn't deviate too much from base price
+        uint256 maxDeviation = (basePrice * 500) / 10000; // 5% max deviation
+        uint256 minPrice = basePrice - maxDeviation;
+        uint256 maxPrice = basePrice + maxDeviation;
+        
+        if (adjustedPrice < minPrice) adjustedPrice = minPrice;
+        if (adjustedPrice > maxPrice) adjustedPrice = maxPrice;
+        
+        return adjustedPrice;
+    }
+
+    function _quickSort(uint256[] memory arr, int256 left, int256 right) internal pure {
+        if (left < right) {
+            int256 pivot = _partition(arr, left, right);
+            _quickSort(arr, left, pivot - 1);
+            _quickSort(arr, pivot + 1, right);
+        }
+    }
+
+    function _partition(uint256[] memory arr, int256 left, int256 right) internal pure returns (int256) {
+        uint256 pivot = arr[uint256(right)];
+        int256 i = left - 1;
+        
+        for (int256 j = left; j < right; j++) {
+            if (arr[uint256(j)] <= pivot) {
+                i++;
+                (arr[uint256(i)], arr[uint256(j)]) = (arr[uint256(j)], arr[uint256(i)]);
+            }
+        }
+        
+        (arr[uint256(i + 1)], arr[uint256(right)]) = (arr[uint256(right)], arr[uint256(i + 1)]);
+        return i + 1;
+    }
+
+    function _initializeDefaultMarketHours() internal {
+        // Initialize storage for market hours - this will be set via setMarketHours later
+        // We can't initialize struct arrays directly in constructor due to storage limitations
     }
 
     // ============ Emergency Functions ============
@@ -613,508 +1016,6 @@ contract PriceOracle is ReentrancyGuard, AccessControl, Pausable {
         return priceHistory[asset];
     }
 
-    // ============ Internal Functions ============
-    
-    function _updateAssetPrice(string memory asset) internal {
-        AssetConfig storage config = assetConfigs[asset];
-        require(config.isActive, "Asset not active");
-        
-        // Collect prices from all active sources
-        uint256[] memory prices = new uint256[](config.sources.length);
-        uint256[] memory weights = new uint256[](config.sources.length);
-        uint256 validSourceCount = 0;
-        uint256 totalWeight = 0;
-        
-        for (uint256 i = 0; i < config.sources.length; i++) {
-            PriceSource storage source = config.sources[i];
-            
-            if (!source.isActive) continue;
-            
-            (bool success, uint256 price, uint256 updatedAt) = _fetchPriceFromSource(source);
-            
-            if (success && block.timestamp - updatedAt <= source.maxStaleness) {
-                prices[validSourceCount] = price;
-                weights[validSourceCount] = source.weight;
-                totalWeight += source.weight;
-                validSourceCount++;
-                
-                // Update source data
-                source.lastPrice = int256(price);
-                source.lastUpdateTime = updatedAt;
-            }
-        }
-        
-        require(validSourceCount >= config.minSources, "Insufficient valid sources");
-        
-        // Calculate aggregated price
-        AggregatedPrice memory aggregated = _calculateAggregatedPrice(
-            prices,
-            weights,
-            validSourceCount,
-            totalWeight
-        );
-        
-        // Validate price against previous value and deviation limits
-        _validatePrice(asset, aggregated.weightedPrice, config.maxDeviation);
-        
-        // Calculate confidence score
-        uint256 confidence = _calculateConfidence(validSourceCount, config.sources.length, aggregated);
-        
-        // Update current price
-        currentPrices[asset] = PriceData({
-            price: aggregated.weightedPrice,
-            timestamp: block.timestamp,
-            confidence: confidence,
-            status: PriceStatus.ACTIVE,
-            sourceCount: validSourceCount,
-            deviation: _calculateDeviation(aggregated.minPrice, aggregated.maxPrice)
-        });
-        
-        // Store aggregated data
-        aggregatedPrices[asset] = aggregated;
-        
-        // Update price history
-        _updatePriceHistory(asset, aggregated.weightedPrice);
-        
-        emit PriceUpdated(
-            asset,
-            aggregated.weightedPrice,
-            block.timestamp,
-            confidence,
-            validSourceCount
-        );
-    }
-
-    function _fetchPriceFromSource(PriceSource memory source) 
-        internal 
-        view 
-        returns (bool success, uint256 price, uint256 updatedAt) 
-    {
-        if (source.sourceType == SourceType.CHAINLINK) {
-            return _fetchChainlinkPrice(source);
-        } else if (source.sourceType == SourceType.CUSTOM) {
-            return _fetchCustomPrice(source);
-        }
-        // Add other source types as needed
-        
-        return (false, 0, 0);
-    }
-
-    function _fetchChainlinkPrice(PriceSource memory source) 
-        internal 
-        view 
-        returns (bool success, uint256 price, uint256 updatedAt) 
-    {
-        try AggregatorV3Interface(source.sourceAddress).latestRoundData() returns (
-            uint80,
-            int256 answer,
-            uint256,
-            uint256 _updatedAt,
-            uint80
-        ) {
-            if (answer > 0) {
-                // Convert to 18 decimals
-                uint256 normalizedPrice = uint256(answer) * (10 ** (18 - source.decimals));
-                return (true, normalizedPrice, _updatedAt);
-            }
-        } catch {
-            return (false, 0, 0);
-        }
-        
-        return (false, 0, 0);
-    }
-
-    function _fetchCustomPrice(PriceSource memory source) 
-        internal 
-        view 
-        returns (bool success, uint256 price, uint256 updatedAt) 
-    {
-        // Custom oracle interface - implement based on specific oracle
-        try source.sourceAddress.staticcall(
-            abi.encodeWithSignature("getPrice()")
-        ) returns (bytes memory data) {
-            if (data.length >= 64) {
-                (uint256 _price, uint256 _updatedAt) = abi.decode(data, (uint256, uint256));
-                if (_price > 0) {
-                    uint256 normalizedPrice = _price * (10 ** (18 - source.decimals));
-                    return (true, normalizedPrice, _updatedAt);
-                }
-            }
-        } catch {
-            return (false, 0, 0);
-        }
-        
-        return (false, 0, 0);
-    }
-
-    function _calculateAggregatedPrice(
-        uint256[] memory prices,
-        uint256[] memory weights,
-        uint256 validCount,
-        uint256 totalWeight
-    ) internal pure returns (AggregatedPrice memory) {
-        require(validCount > 0, "No valid prices");
-        
-        // Calculate weighted average
-        uint256 weightedSum = 0;
-        for (uint256 i = 0; i < validCount; i++) {
-            weightedSum += prices[i] * weights[i];
-        }
-        uint256 weightedPrice = totalWeight > 0 ? weightedSum / totalWeight : 0;
-        
-        // Calculate median
-        uint256[] memory sortedPrices = new uint256[](validCount);
-        for (uint256 i = 0; i < validCount; i++) {
-            sortedPrices[i] = prices[i];
-        }
-        _quickSort(sortedPrices, 0, int256(validCount - 1));
-        
-        uint256 medianPrice;
-        if (validCount % 2 == 0) {
-            medianPrice = (sortedPrices[validCount / 2 - 1] + sortedPrices[validCount / 2]) / 2;
-        } else {
-            medianPrice = sortedPrices[validCount / 2];
-        }
-        
-        // Calculate average
-        uint256 sum = 0;
-        for (uint256 i = 0; i < validCount; i++) {
-            sum += prices[i];
-        }
-        uint256 averagePrice = sum / validCount;
-        
-        // Find min and max
-        uint256 minPrice = sortedPrices[0];
-        uint256 maxPrice = sortedPrices[validCount - 1];
-        
-        return AggregatedPrice({
-            weightedPrice: weightedPrice,
-            medianPrice: medianPrice,
-            averagePrice: averagePrice,
-            minPrice: minPrice,
-            maxPrice: maxPrice,
-            validSources: validCount,
-            totalWeight: totalWeight,
-            lastUpdate: block.timestamp
-        });
-    }
-
-    function _validatePrice(string memory asset, uint256 newPrice, uint256 maxDeviation) internal {
-        PriceData memory currentPrice = currentPrices[asset];
-        
-        if (currentPrice.timestamp > 0 && currentPrice.price > 0) {
-            uint256 deviation = _calculateDeviation(currentPrice.price, newPrice);
-            
-            if (deviation > maxDeviation) {
-                emit PriceDeviation(asset, newPrice, currentPrice.price, deviation);
-                
-                // Trigger emergency mode if deviation is extreme
-                if (deviation > emergencyThreshold) {
-                    assetEmergencyMode[asset] = true;
-                    revert("Price deviation too high");
-                }
-            }
-        }
-    }
-
-    function _calculateConfidence(
-        uint256 validSources,
-        uint256 totalSources,
-        AggregatedPrice memory aggregated
-    ) internal pure returns (uint256) {
-        // Base confidence from source availability
-        uint256 sourceConfidence = (validSources * 5000) / totalSources; // Max 50%
-        
-        // Confidence from price consistency
-        uint256 deviation = _calculateDeviation(aggregated.minPrice, aggregated.maxPrice);
-        uint256 consistencyConfidence = deviation < 500 ? 5000 : (5000 - (deviation - 500) * 10); // Max 50%
-        
-        return Math.min(sourceConfidence + consistencyConfidence, 10000);
-    }
-
-    function _calculateDeviation(uint256 price1, uint256 price2) internal pure returns (uint256) {
-        if (price1 == 0 || price2 == 0) return 0;
-        
-        uint256 diff = price1 > price2 ? price1 - price2 : price2 - price1;
-        return (diff * 10000) / Math.max(price1, price2);
-    }
-
-    function _updatePriceHistory(string memory asset, uint256 price) internal {
-        uint256[] storage history = priceHistory[asset];
-        
-        history.push(price);
-        
-        // Keep only last 24 prices
-        if (history.length > 24) {
-            for (uint256 i = 0; i < history.length - 1; i++) {
-                history[i] = history[i + 1];
-            }
-            history.pop();
-        }
-    }
-
-    function _payKeeperReward(address keeper, uint256 assetsUpdated) internal {
-        uint256 reward = keeperReward * assetsUpdated;
-        
-        if (keeperRewardToken != address(0) && reward > 0) {
-            // Pay in ERC20 token
-            IERC20(keeperRewardToken).transfer(keeper, reward);
-        } else if (address(this).balance >= reward) {
-            // Pay in ETH
-            payable(keeper).transfer(reward);
-        }
-        
-        emit KeeperRewardPaid(keeper, reward, assetsUpdated);
-    }
-
-    function _quickSort(uint256[] memory arr, int256 left, int256 right) internal pure {
-        if (left < right) {
-            int256 pivot = _partition(arr, left, right);
-            _quickSort(arr, left, pivot - 1);
-            _quickSort(arr, pivot + 1, right);
-        }
-    }
-
-    function _partition(uint256[] memory arr, int256 left, int256 right) internal pure returns (int256) {
-        uint256 pivot = arr[uint256(right)];
-        int256 i = left - 1;
-        
-        for (int256 j = left; j < right; j++) {
-            if (arr[uint256(j)] <= pivot) {
-                i++;
-                (arr[uint256(i)], arr[uint256(j)]) = (arr[uint256(j)], arr[uint256(i)]);
-            }
-        }
-        
-        (arr[uint256(i + 1)], arr[uint256(right)]) = (arr[uint256(right)], arr[uint256(i + 1)]);
-        return i + 1;
-    }
-
-    function _initializeDefaultMarketHours() internal {
-        // Crypto markets (24/7)
-        marketHours["ETH"] = MarketHours({
-            openTime: 0,
-            closeTime: 86399,
-            tradingDays: [true, true, true, true, true, true, true],
-            isAlwaysOpen: true,
-            timezone: "UTC"
-        });
-        
-        marketHours["BTC"] = MarketHours({
-            openTime: 0,
-            closeTime: 86399,
-            tradingDays: [true, true, true, true, true, true, true],
-            isAlwaysOpen: true,
-            timezone: "UTC"
-        });
-        
-        // US Stock Market (9:30 AM - 4:00 PM EST, Mon-Fri)
-        marketHours["AAPL"] = MarketHours({
-            openTime: 50400, // 14:00 UTC (9:30 EST)
-            closeTime: 73800, // 20:30 UTC (4:00 EST)
-            tradingDays: [false, true, true, true, true, true, false],
-            isAlwaysOpen: false,
-            timezone: "EST"
-        });
-        
-        // Forex Market (24/5 - Sunday 5 PM EST to Friday 5 PM EST)
-        marketHours["EUR/USD"] = MarketHours({
-            openTime: 79200, // Sunday 22:00 UTC (5 PM EST)
-            closeTime: 79200, // Friday 22:00 UTC (5 PM EST)
-            tradingDays: [true, true, true, true, true, true, false],
-            isAlwaysOpen: false,
-            timezone: "EST"
-        });
-    }
-
-    // ============ Admin Functions ============
-    
-    /**
-     * @dev Updates global oracle parameters
-     * @param _updateInterval Update interval in seconds
-     * @param _globalMaxStaleness Global maximum staleness
-     * @param _minimumConfidence Minimum confidence required
-     * @param _volatilityThreshold Volatility threshold for alerts
-     * @param _emergencyThreshold Emergency threshold for auto-shutdown
-     */
-    function setOracleParameters(
-        uint256 _updateInterval,
-        uint256 _globalMaxStaleness,
-        uint256 _minimumConfidence,
-        uint256 _volatilityThreshold,
-        uint256 _emergencyThreshold
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(_updateInterval >= 60, "Update interval too short"); // Min 1 minute
-        require(_globalMaxStaleness <= MAX_STALENESS, "Max staleness too high");
-        require(_minimumConfidence <= 10000, "Invalid confidence");
-        require(_volatilityThreshold <= 10000, "Invalid volatility threshold");
-        require(_emergencyThreshold <= 10000, "Invalid emergency threshold");
-        
-        updateInterval = _updateInterval;
-        globalMaxStaleness = _globalMaxStaleness;
-        minimumConfidence = _minimumConfidence;
-        volatilityThreshold = _volatilityThreshold;
-        emergencyThreshold = _emergencyThreshold;
-    }
-
-    /**
-     * @dev Sets keeper reward configuration
-     * @param _keeperReward Reward amount per asset updated
-     * @param _keeperRewardToken Token address for rewards (address(0) for ETH)
-     */
-    function setKeeperReward(uint256 _keeperReward, address _keeperRewardToken) 
-        external 
-        onlyRole(DEFAULT_ADMIN_ROLE) 
-    {
-        require(_keeperReward <= 1e18, "Keeper reward too high"); // Max 1 ETH per asset
-        keeperReward = _keeperReward;
-        keeperRewardToken = _keeperRewardToken;
-    }
-
-    /**
-     * @dev Updates source configuration
-     * @param asset Asset symbol
-     * @param sourceAddress Source address
-     * @param weight New weight
-     * @param maxStaleness New max staleness
-     * @param isActive Whether source is active
-     */
-    function updateSourceConfig(
-        string memory asset,
-        address sourceAddress,
-        uint256 weight,
-        uint256 maxStaleness,
-        bool isActive
-    ) external onlyRole(OPERATOR_ROLE) validAsset(asset) {
-        AssetConfig storage config = assetConfigs[asset];
-        uint256 sourceIdx = config.sourceIndex[sourceAddress];
-        require(sourceIdx > 0, "Source not found");
-        
-        PriceSource storage source = config.sources[sourceIdx - 1];
-        require(weight <= 10000, "Invalid weight");
-        require(maxStaleness <= MAX_STALENESS, "Staleness too high");
-        
-        source.weight = weight;
-        source.maxStaleness = maxStaleness;
-        source.isActive = isActive;
-    }
-
-    /**
-     * @dev Toggles asset active status
-     * @param asset Asset symbol
-     * @param isActive Whether asset should be active
-     */
-    function setAssetActive(string memory asset, bool isActive) 
-        external 
-        onlyRole(OPERATOR_ROLE) 
-        validAsset(asset) 
-    {
-        assetConfigs[asset].isActive = isActive;
-    }
-
-    // ============ 24/7 Stock Price Functions ============
-    
-    /**
-     * @dev Special function for 24/7 stock price updates using synthetic pricing
-     * This enables your killer feature: 24/7 stock options trading!
-     * @param stockSymbol Stock symbol (e.g., "AAPL", "TSLA")
-     * @param afterHoursMultiplier Multiplier for after-hours pricing adjustments
-     * @param newsImpactFactor Factor for news-based price adjustments
-     */
-    function update24x7StockPrice(
-        string memory stockSymbol,
-        uint256 afterHoursMultiplier,
-        uint256 newsImpactFactor
-    ) external onlyPriceKeeper validAsset(stockSymbol) {
-        AssetConfig storage config = assetConfigs[stockSymbol];
-        require(config.assetType == AssetType.STOCK, "Not a stock asset");
-        
-        // Get base price from last market close
-        uint256 basePrice = currentPrices[stockSymbol].price;
-        
-        // Apply after-hours adjustments if market is closed
-        if (!this.isMarketOpen(stockSymbol)) {
-            // Use futures pricing, pre-market indicators, and news sentiment
-            basePrice = _calculateAfterHoursPrice(
-                stockSymbol,
-                basePrice,
-                afterHoursMultiplier,
-                newsImpactFactor
-            );
-        }
-        
-        // Update with synthetic 24/7 price
-        currentPrices[stockSymbol] = PriceData({
-            price: basePrice,
-            timestamp: block.timestamp,
-            confidence: this.isMarketOpen(stockSymbol) ? 9000 : 7000, // Lower confidence after hours
-            status: PriceStatus.ACTIVE,
-            sourceCount: 1,
-            deviation: 0
-        });
-        
-        _updatePriceHistory(stockSymbol, basePrice);
-        
-        emit PriceUpdated(
-            stockSymbol,
-            basePrice,
-            block.timestamp,
-            this.isMarketOpen(stockSymbol) ? 9000 : 7000,
-            1
-        );
-    }
-
-    /**
-     * @dev Calculates synthetic after-hours price for stocks
-     * This is your competitive advantage - trading stocks 24/7!
-     */
-    function _calculateAfterHoursPrice(
-        string memory stockSymbol,
-        uint256 basePrice,
-        uint256 afterHoursMultiplier,
-        uint256 newsImpactFactor
-    ) internal view returns (uint256) {
-        // Start with last market close price
-        uint256 adjustedPrice = basePrice;
-        
-        // Apply after-hours multiplier (typically 0.95-1.05 for normal conditions)
-        adjustedPrice = (adjustedPrice * afterHoursMultiplier) / PRECISION;
-        
-        // Apply news impact factor (could be from external news feeds)
-        adjustedPrice = (adjustedPrice * newsImpactFactor) / PRECISION;
-        
-        // Add some time-based decay to prevent stale pricing
-        uint256 timeSinceUpdate = block.timestamp - currentPrices[stockSymbol].timestamp;
-        if (timeSinceUpdate > 4 hours) {
-            // Gradually reduce confidence and add small random walk
-            uint256 decay = Math.min(timeSinceUpdate / 1 hours, 10); // Max 10% decay
-            adjustedPrice = (adjustedPrice * (100 - decay)) / 100;
-        }
-        
-        return adjustedPrice;
-    }
-
-    /**
-     * @dev Gets synthetic stock price with market status
-     * @param stockSymbol Stock symbol
-     * @return price Current synthetic price
-     * @return isMarketHours Whether market is in trading hours
-     * @return confidence Price confidence level
-     */
-    function getSyntheticStockPrice(string memory stockSymbol) 
-        external 
-        view 
-        validAsset(stockSymbol) 
-        returns (uint256 price, bool isMarketHours, uint256 confidence) 
-    {
-        require(assetConfigs[stockSymbol].assetType == AssetType.STOCK, "Not a stock");
-        
-        PriceData memory priceData = currentPrices[stockSymbol];
-        bool marketOpen = this.isMarketOpen(stockSymbol);
-        
-        return (priceData.price, marketOpen, priceData.confidence);
-    }
-
     // ============ Circuit Breaker Functions ============
     
     /**
@@ -1195,68 +1096,6 @@ contract PriceOracle is ReentrancyGuard, AccessControl, Pausable {
     }
 
     /**
-     * @dev Gets detailed source health for an asset
-     * @param asset Asset symbol
-     * @return sourceHealth Array of source health status
-     */
-    function getSourceHealth(string memory asset) 
-        external 
-        view 
-        validAsset(asset) 
-        returns (bool[] memory sourceHealth) 
-    {
-        AssetConfig storage config = assetConfigs[asset];
-        bool[] memory health = new bool[](config.sources.length);
-        
-        for (uint256 i = 0; i < config.sources.length; i++) {
-            PriceSource memory source = config.sources[i];
-            health[i] = source.isActive && 
-                       (block.timestamp - source.lastUpdateTime <= source.maxStaleness);
-        }
-        
-        return health;
-    }
-
-    // ============ Fallback and Recovery ============
-    
-    /**
-     * @dev Fallback price getter with multiple strategies
-     * @param asset Asset symbol
-     * @return price Fallback price
-     * @return source Source of fallback price
-     */
-    function getFallbackPrice(string memory asset) 
-        external 
-        view 
-        validAsset(asset) 
-        returns (uint256 price, string memory source) 
-    {
-        PriceData memory priceData = currentPrices[asset];
-        AssetConfig storage config = assetConfigs[asset];
-        
-        // Strategy 1: Use current price if not too stale
-        if (block.timestamp - priceData.timestamp <= MAX_STALENESS) {
-            return (priceData.price, "current");
-        }
-        
-        // Strategy 2: Use emergency price if set
-        if (config.emergencyPrice > 0) {
-            return (config.emergencyPrice, "emergency");
-        }
-        
-        // Strategy 3: Use last known good price from history
-        uint256[] memory history = priceHistory[asset];
-        if (history.length > 0) {
-            return (history[history.length - 1], "history");
-        }
-        
-        // Strategy 4: Return 0 and let caller handle
-        return (0, "none");
-    }
-
-    // ============ Utility Functions ============
-    
-    /**
      * @dev Batch get prices for multiple assets
      * @param assets Array of asset symbols
      * @return prices Array of current prices
@@ -1282,31 +1121,214 @@ contract PriceOracle is ReentrancyGuard, AccessControl, Pausable {
     }
 
     /**
-     * @dev Calculate price change percentage between two timestamps
-     * @param asset Asset symbol
-     * @param fromTime Start timestamp
-     * @param toTime End timestamp
-     * @return changePercent Price change percentage (basis points)
+     * @dev Special function to get 24/7 stock availability
+     * Returns which stock assets can be traded 24/7 vs market hours only
+     * @return alwaysAvailable Stocks available 24/7
+     * @return marketHoursOnly Stocks limited to market hours
      */
-    function getPriceChange(string memory asset, uint256 fromTime, uint256 toTime) 
+    function getStockAvailability() 
         external 
         view 
-        validAsset(asset) 
-        returns (int256 changePercent) 
+        returns (string[] memory alwaysAvailable, string[] memory marketHoursOnly) 
     {
-        // Simplified implementation - would need price history by timestamp
-        uint256[] memory history = priceHistory[asset];
-        if (history.length < 2) return 0;
+        string[] memory available = new string[](supportedAssets.length);
+        string[] memory limited = new string[](supportedAssets.length);
+        uint256 availableCount = 0;
+        uint256 limitedCount = 0;
         
-        uint256 oldPrice = history[0];
-        uint256 newPrice = history[history.length - 1];
+        for (uint256 i = 0; i < supportedAssets.length; i++) {
+            string memory asset = supportedAssets[i];
+            
+            if (assetConfigs[asset].assetType == AssetType.STOCK) {
+                MarketHours memory _hours = marketHours[asset];
+                
+                if (_hours.isAlwaysOpen) {
+                    available[availableCount] = asset;
+                    availableCount++;
+                } else {
+                    limited[limitedCount] = asset;
+                    limitedCount++;
+                }
+            }
+        }
         
-        if (oldPrice == 0) return 0;
+        // Create properly sized arrays
+        string[] memory resultAvailable = new string[](availableCount);
+        string[] memory resultLimited = new string[](limitedCount);
         
-        int256 change = int256(newPrice) - int256(oldPrice);
-        changePercent = (change * 10000) / int256(oldPrice);
+        for (uint256 i = 0; i < availableCount; i++) {
+            resultAvailable[i] = available[i];
+        }
         
-        return changePercent;
+        for (uint256 i = 0; i < limitedCount; i++) {
+            resultLimited[i] = limited[i];
+        }
+        
+        return (resultAvailable, resultLimited);
+    }
+
+    // ============ Admin Functions ============
+    
+    /**
+     * @dev Updates global oracle parameters
+     * @param _updateInterval Update interval in seconds
+     * @param _globalMaxStaleness Global maximum staleness
+     * @param _minimumConfidence Minimum confidence required
+     * @param _volatilityThreshold Volatility threshold for alerts
+     * @param _emergencyThreshold Emergency threshold for auto-shutdown
+     */
+    function setOracleParameters(
+        uint256 _updateInterval,
+        uint256 _globalMaxStaleness,
+        uint256 _minimumConfidence,
+        uint256 _volatilityThreshold,
+        uint256 _emergencyThreshold
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_updateInterval >= 60, "Update interval too short"); // Min 1 minute
+        require(_globalMaxStaleness <= MAX_STALENESS, "Max staleness too high");
+        require(_minimumConfidence <= 10000, "Invalid confidence");
+        require(_volatilityThreshold <= 10000, "Invalid volatility threshold");
+        require(_emergencyThreshold <= 10000, "Invalid emergency threshold");
+        
+        updateInterval = _updateInterval;
+        globalMaxStaleness = _globalMaxStaleness;
+        minimumConfidence = _minimumConfidence;
+        volatilityThreshold = _volatilityThreshold;
+        emergencyThreshold = _emergencyThreshold;
+    }
+
+    /**
+     * @dev Sets keeper reward configuration
+     * @param _keeperReward Reward amount per asset updated
+     * @param _keeperRewardToken Token address for rewards (address(0) for ETH)
+     */
+    function setKeeperReward(uint256 _keeperReward, address _keeperRewardToken) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+    {
+        require(_keeperReward <= 1e18, "Keeper reward too high"); // Max 1 ETH per asset
+        keeperReward = _keeperReward;
+        keeperRewardToken = _keeperRewardToken;
+    }
+
+    /**
+     * @dev Removes a price source
+     * @param asset Asset symbol
+     * @param sourceAddress Source address to remove
+     */
+    function removePriceSource(string memory asset, address sourceAddress) 
+        external 
+        onlyRole(OPERATOR_ROLE) 
+        validAsset(asset) 
+    {
+        AssetConfig storage config = assetConfigs[asset];
+        uint256 sourceIdx = config.sourceIndex[sourceAddress];
+        require(sourceIdx > 0, "Source not found");
+        
+        // Convert to 0-based index
+        sourceIdx--;
+        
+        // Remove from array by swapping with last element
+        uint256 lastIdx = config.sources.length - 1;
+        if (sourceIdx != lastIdx) {
+            config.sources[sourceIdx] = config.sources[lastIdx];
+            // Update index mapping for moved element
+            config.sourceIndex[config.sources[sourceIdx].sourceAddress] = sourceIdx + 1;
+        }
+        
+        config.sources.pop();
+        delete config.sourceIndex[sourceAddress];
+        
+        emit SourceRemoved(asset, sourceAddress);
+    }
+
+    /**
+     * @dev Updates source configuration
+     * @param asset Asset symbol
+     * @param sourceAddress Source address
+     * @param weight New weight
+     * @param maxStaleness New max staleness
+     * @param isActive Whether source is active
+     */
+    function updateSourceConfig(
+        string memory asset,
+        address sourceAddress,
+        uint256 weight,
+        uint256 maxStaleness,
+        bool isActive
+    ) external onlyRole(OPERATOR_ROLE) validAsset(asset) {
+        AssetConfig storage config = assetConfigs[asset];
+        uint256 sourceIdx = config.sourceIndex[sourceAddress];
+        require(sourceIdx > 0, "Source not found");
+        
+        PriceSource storage source = config.sources[sourceIdx - 1];
+        require(weight <= 10000, "Invalid weight");
+        require(maxStaleness <= MAX_STALENESS, "Staleness too high");
+        
+        source.weight = weight;
+        source.maxStaleness = maxStaleness;
+        source.isActive = isActive;
+    }
+
+    /**
+     * @dev Toggles asset active status
+     * @param asset Asset symbol
+     * @param isActive Whether asset should be active
+     */
+    function setAssetActive(string memory asset, bool isActive) 
+        external 
+        onlyRole(OPERATOR_ROLE) 
+        validAsset(asset) 
+    {
+        assetConfigs[asset].isActive = isActive;
+    }
+
+    /**
+     * @dev Initialize default market hours for major assets
+     * This function can be called after deployment to set up common market hours
+     */
+    function initializeDefaultMarketHours() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        // Crypto markets (24/7) - These will be set when assets are added
+        // We'll add them programmatically as needed
+        
+        // US Stock Market (9:30 AM - 4:00 PM EST, Mon-Fri)
+        bool[7] memory stockDays = [false, true, true, true, true, true, false]; // Mon-Fri
+        
+        // The actual initialization will happen when specific assets are added
+        // This is a placeholder function for post-deployment setup
+    }
+
+    /**
+     * @dev Set specific market hours for a stock to enable 24/7 trading
+     * This is your killer feature enabler!
+     * @param stockSymbol Stock symbol (e.g., "AAPL")
+     * @param enable24x7 Whether to enable 24/7 trading for this stock
+     */
+    function setStock24x7Trading(
+        string memory stockSymbol,
+        bool enable24x7
+    ) external onlyRole(OPERATOR_ROLE) validAsset(stockSymbol) {
+        require(assetConfigs[stockSymbol].assetType == AssetType.STOCK, "Not a stock asset");
+        
+        if (enable24x7) {
+            // Enable 24/7 trading
+            marketHours[stockSymbol] = MarketHours({
+                openTime: 0,
+                closeTime: 86399,
+                tradingDays: [true, true, true, true, true, true, true],
+                isAlwaysOpen: true,
+                timezone: "UTC"
+            });
+        } else {
+            // Revert to standard market hours (9:30 AM - 4:00 PM EST, Mon-Fri)
+            marketHours[stockSymbol] = MarketHours({
+                openTime: 50400, // 14:00 UTC (9:30 EST)
+                closeTime: 73800, // 20:30 UTC (4:00 EST)
+                tradingDays: [false, true, true, true, true, true, false],
+                isAlwaysOpen: false,
+                timezone: "EST"
+            });
+        }
     }
 
     // ============ Maintenance Functions ============
