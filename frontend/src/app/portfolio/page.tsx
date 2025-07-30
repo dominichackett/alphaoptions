@@ -162,27 +162,6 @@ export default function PortfolioPage() {
     return () => clearInterval(timer);
   }, []);
 
-  // Market status helper
-  const getMarketStatus = () => {
-    const now = new Date();
-    const hour = now.getUTCHours();
-    const day = now.getUTCDay();
-    
-    return {
-      crypto: { status: 'Open', color: 'text-green-400' },
-      stocks: { 
-        status: (day >= 1 && day <= 5 && hour >= 14 && hour < 21) ? 'Open' : 'Closed',
-        color: (day >= 1 && day <= 5 && hour >= 14 && hour < 21) ? 'text-green-400' : 'text-red-400'
-      },
-      forex: { 
-        status: (day !== 0 && !(day === 6 && hour >= 22)) ? 'Open' : 'Closed',
-        color: (day !== 0 && !(day === 6 && hour >= 22)) ? 'text-green-400' : 'text-red-400'
-      }
-    };
-  };
-
-  const marketStatus = getMarketStatus();
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-black text-white">
       {/* Header */}
@@ -355,94 +334,6 @@ export default function PortfolioPage() {
                 {greeksData.map((greek, index) => (
                   <div key={index} className="space-y-2">
                     <div className="flex justify-between items-center">
-                  <span className="text-gray-300">VaR (95%)</span>
-                  <span className="text-orange-400 font-medium">$4,280</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-gray-300">Correlation to Market</span>
-                  <span className="text-white font-medium">0.72</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-gray-800/50 p-6 rounded-xl border border-gray-700">
-              <h3 className="text-xl font-bold text-white mb-6">Expiry Calendar</h3>
-              <div className="space-y-3">
-                {positions
-                  .sort((a, b) => a.daysToExpiry - b.daysToExpiry)
-                  .map((position) => (
-                    <div key={position.id} className="flex items-center justify-between p-3 bg-gray-900/50 rounded-lg">
-                      <div className="flex items-center space-x-3">
-                        <div className={`w-3 h-3 rounded-full ${
-                          position.daysToExpiry <= 7 ? 'bg-red-500' :
-                          position.daysToExpiry <= 30 ? 'bg-yellow-500' :
-                          'bg-green-500'
-                        }`}></div>
-                        <div>
-                          <div className="text-white font-medium">{position.asset} {position.strike} {position.type}</div>
-                          <div className="text-xs text-gray-400">{position.expiry}</div>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-white font-medium">{position.daysToExpiry}d</div>
-                        <div className={`text-xs ${
-                          position.pnl.startsWith('+') ? 'text-green-400' : 'text-red-400'
-                        }`}>
-                          {position.pnlPercent}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Action Buttons */}
-          <div className="bg-gray-800/50 p-6 rounded-xl border border-gray-700">
-            <h3 className="text-xl font-bold text-white mb-6">Portfolio Actions</h3>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <button className="bg-gradient-to-r from-blue-600 to-purple-600 p-4 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all transform hover:scale-105">
-                <div className="text-center">
-                  <svg className="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                  </svg>
-                  <div className="font-medium">Add Position</div>
-                </div>
-              </button>
-              
-              <button className="bg-gradient-to-r from-green-600 to-emerald-600 p-4 rounded-lg hover:from-green-700 hover:to-emerald-700 transition-all transform hover:scale-105">
-                <div className="text-center">
-                  <svg className="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 00-2-2z" />
-                  </svg>
-                  <div className="font-medium">Rebalance</div>
-                </div>
-              </button>
-              
-              <button className="bg-gradient-to-r from-orange-600 to-red-600 p-4 rounded-lg hover:from-orange-700 hover:to-red-700 transition-all transform hover:scale-105">
-                <div className="text-center">
-                  <svg className="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
-                  </svg>
-                  <div className="font-medium">Hedge Risk</div>
-                </div>
-              </button>
-              
-              <button className="bg-gradient-to-r from-purple-600 to-pink-600 p-4 rounded-lg hover:from-purple-700 hover:to-pink-700 transition-all transform hover:scale-105">
-                <div className="text-center">
-                  <svg className="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                  <div className="font-medium">Export Report</div>
-                </div>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
                       <span className="text-gray-300 font-medium">{greek.name}</span>
                       <span className="text-white font-bold">{greek.value}</span>
                     </div>
@@ -646,4 +537,92 @@ export default function PortfolioPage() {
                   <span className="text-gray-300">Win Rate</span>
                   <span className="text-green-400 font-medium">67.8%</span>
                 </div>
-                <div className="flex justify-between items-center"></div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-300">VaR (95%)</span>
+                  <span className="text-orange-400 font-medium">$4,280</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-300">Correlation to Market</span>
+                  <span className="text-white font-medium">0.72</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-gray-800/50 p-6 rounded-xl border border-gray-700">
+              <h3 className="text-xl font-bold text-white mb-6">Expiry Calendar</h3>
+              <div className="space-y-3">
+                {positions
+                  .sort((a, b) => a.daysToExpiry - b.daysToExpiry)
+                  .map((position) => (
+                    <div key={position.id} className="flex items-center justify-between p-3 bg-gray-900/50 rounded-lg">
+                      <div className="flex items-center space-x-3">
+                        <div className={`w-3 h-3 rounded-full ${
+                          position.daysToExpiry <= 7 ? 'bg-red-500' :
+                          position.daysToExpiry <= 30 ? 'bg-yellow-500' :
+                          'bg-green-500'
+                        }`}></div>
+                        <div>
+                          <div className="text-white font-medium">{position.asset} {position.strike} {position.type}</div>
+                          <div className="text-xs text-gray-400">{position.expiry}</div>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-white font-medium">{position.daysToExpiry}d</div>
+                        <div className={`text-xs ${
+                          position.pnl.startsWith('+') ? 'text-green-400' : 'text-red-400'
+                        }`}>
+                          {position.pnlPercent}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="bg-gray-800/50 p-6 rounded-xl border border-gray-700">
+            <h3 className="text-xl font-bold text-white mb-6">Portfolio Actions</h3>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <button className="bg-gradient-to-r from-blue-600 to-purple-600 p-4 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all transform hover:scale-105">
+                <div className="text-center">
+                  <svg className="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                  </svg>
+                  <div className="font-medium">Add Position</div>
+                </div>
+              </button>
+              
+              <button className="bg-gradient-to-r from-green-600 to-emerald-600 p-4 rounded-lg hover:from-green-700 hover:to-emerald-700 transition-all transform hover:scale-105">
+                <div className="text-center">
+                  <svg className="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 00-2-2z" />
+                  </svg>
+                  <div className="font-medium">Rebalance</div>
+                </div>
+              </button>
+              
+              <button className="bg-gradient-to-r from-orange-600 to-red-600 p-4 rounded-lg hover:from-orange-700 hover:to-red-700 transition-all transform hover:scale-105">
+                <div className="text-center">
+                  <svg className="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
+                  </svg>
+                  <div className="font-medium">Hedge Risk</div>
+                </div>
+              </button>
+              
+              <button className="bg-gradient-to-r from-purple-600 to-pink-600 p-4 rounded-lg hover:from-purple-700 hover:to-pink-700 transition-all transform hover:scale-105">
+                <div className="text-center">
+                  <svg className="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  <div className="font-medium">Export Report</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
