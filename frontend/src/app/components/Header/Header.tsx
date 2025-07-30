@@ -174,13 +174,14 @@ const OptionsHeader = () => {
                 </svg>
               </button>
               
-              {/* Trading Dropdown Menu */}
+              {/* Enhanced Trading Dropdown Menu */}
               {isTradingDropdownOpen && (
                 <div 
-                  className="absolute top-full left-0 mt-2 w-64 bg-gray-800 border border-gray-600 rounded-lg shadow-xl z-50"
+                  className="absolute top-full left-0 mt-2 w-72 bg-gray-800 border border-gray-600 rounded-lg shadow-xl z-50"
                   onMouseLeave={() => setIsTradingDropdownOpen(false)}
                 >
                   <div className="py-2">
+                    {/* Asset Classes Section */}
                     <div className="px-4 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
                       Asset Classes
                     </div>
@@ -209,21 +210,53 @@ const OptionsHeader = () => {
                       <span className="text-xs text-gray-400 ml-auto">24/5</span>
                     </a>
                     
+                 
+                    {/* NEW: Income Strategies Section */}
                     <div className="border-t border-gray-700 mt-2 pt-2">
-                      <div className="px-4 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                        Strategy Builder
+                      <div className="px-4 py-2 text-xs font-semibold text-yellow-400 uppercase tracking-wider flex items-center space-x-1">
+                        <span>💰</span>
+                        <span>Earn Income</span>
+                        <span className="bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded-full text-xs font-normal">NEW</span>
                       </div>
                       <a 
-                        href="/strategies" 
-                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200"
+                        href="/income/covered-calls" 
+                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200 group"
                       >
-                        Build Custom Strategy
+                        <div className="flex items-center justify-between">
+                          <span>Sell Covered Calls</span>
+                          <span className="text-xs text-green-400 opacity-0 group-hover:opacity-100 transition-opacity">5-15% APY</span>
+                        </div>
+                        <div className="text-xs text-gray-500 mt-0.5">Generate income from holdings</div>
                       </a>
                       <a 
-                        href="/templates" 
-                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200"
+                        href="/income/cash-secured-puts" 
+                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200 group"
                       >
-                        Strategy Templates
+                        <div className="flex items-center justify-between">
+                          <span>Cash-Secured Puts</span>
+                          <span className="text-xs text-green-400 opacity-0 group-hover:opacity-100 transition-opacity">8-20% APY</span>
+                        </div>
+                        <div className="text-xs text-gray-500 mt-0.5">Earn while waiting to buy</div>
+                      </a>
+                      <a 
+                        href="/income/volatility-farming" 
+                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200 group"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span>Volatility Farming</span>
+                          <span className="text-xs text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity">12-35% APY</span>
+                        </div>
+                        <div className="text-xs text-gray-500 mt-0.5">Iron condors & straddles</div>
+                      </a>
+                      <a 
+                        href="/income/opportunities" 
+                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200 group"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span>Premium Opportunities</span>
+                          <span className="text-xs text-purple-400 opacity-0 group-hover:opacity-100 transition-opacity">Live Feed</span>
+                        </div>
+                        <div className="text-xs text-gray-500 mt-0.5">AI-suggested income trades</div>
                       </a>
                     </div>
                   </div>
@@ -245,81 +278,7 @@ const OptionsHeader = () => {
               <span>Analytics</span>
             </a>
             
-            {/* Account Dropdown - Only show when fully authenticated */}
-            {isAuthenticated && (
-              <div className="relative group">
-                <button 
-                  className="text-gray-300 hover:text-white transition-colors duration-200 flex items-center space-x-1"
-                  onClick={() => setIsAccountDropdownOpen(!isAccountDropdownOpen)}
-                  onMouseEnter={() => setIsAccountDropdownOpen(true)}
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                  </svg>
-                  <span>Account</span>
-                  <svg className="w-4 h-4 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                       style={{ transform: isAccountDropdownOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-                
-                {/* Account Dropdown Menu */}
-                {isAccountDropdownOpen && (
-                  <div 
-                    className="absolute top-full right-0 mt-2 w-56 bg-gray-800 border border-gray-600 rounded-lg shadow-xl z-50"
-                    onMouseLeave={() => setIsAccountDropdownOpen(false)}
-                  >
-                    <div className="py-2">
-                      <div className="px-4 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                        Trading
-                      </div>
-                      <a 
-                        href="/positions" 
-                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200"
-                      >
-                        Open Positions
-                      </a>
-                      <a 
-                        href="/orders" 
-                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200"
-                      >
-                        Order History
-                      </a>
-                      <a 
-                        href="/alerts" 
-                        className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200"
-                      >
-                        Price Alerts
-                      </a>
-                      
-                      <div className="border-t border-gray-700 mt-2 pt-2">
-                        <div className="px-4 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                          Account
-                        </div>
-                        <a 
-                          href="/profile" 
-                          className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200"
-                        >
-                          Profile Settings
-                        </a>
-                        <a 
-                          href="/preferences" 
-                          className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200"
-                        >
-                          Trading Preferences
-                        </a>
-                        <a 
-                          href="/security" 
-                          className="block px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors duration-200"
-                        >
-                          Security
-                        </a>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+           
           </nav>
 
           {/* CTA Buttons - Sign In when not connected OR connection is broken */}
@@ -480,6 +439,44 @@ const OptionsHeader = () => {
                   </a>
                   <a href="/strategies" className="block text-gray-300 hover:text-white transition-colors duration-200">
                     Strategy Builder
+                  </a>
+                  <a href="/templates" className="block text-gray-300 hover:text-white transition-colors duration-200">
+                    Strategy Templates
+                  </a>
+                </div>
+              </div>
+
+              {/* Mobile Income Section */}
+              <div className="space-y-2">
+                <span className="text-yellow-400 text-sm font-medium flex items-center space-x-2">
+                  <span>💰</span>
+                  <span>Earn Income</span>
+                  <span className="bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded-full text-xs font-normal">NEW</span>
+                </span>
+                <div className="pl-6 space-y-2">
+                  <a href="/income/covered-calls" className="block text-gray-300 hover:text-white transition-colors duration-200">
+                    <div className="flex items-center justify-between">
+                      <span>Sell Covered Calls</span>
+                      <span className="text-xs text-green-400">5-15% APY</span>
+                    </div>
+                  </a>
+                  <a href="/income/cash-secured-puts" className="block text-gray-300 hover:text-white transition-colors duration-200">
+                    <div className="flex items-center justify-between">
+                      <span>Cash-Secured Puts</span>
+                      <span className="text-xs text-green-400">8-20% APY</span>
+                    </div>
+                  </a>
+                  <a href="/income/volatility-farming" className="block text-gray-300 hover:text-white transition-colors duration-200">
+                    <div className="flex items-center justify-between">
+                      <span>Volatility Farming</span>
+                      <span className="text-xs text-blue-400">12-35% APY</span>
+                    </div>
+                  </a>
+                  <a href="/income/opportunities" className="block text-gray-300 hover:text-white transition-colors duration-200">
+                    <div className="flex items-center justify-between">
+                      <span>Premium Opportunities</span>
+                      <span className="text-xs text-purple-400">Live</span>
+                    </div>
                   </a>
                 </div>
               </div>
