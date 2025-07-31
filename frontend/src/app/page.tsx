@@ -23,6 +23,17 @@ const OptionsDAppMain = () => {
                 Launch App
               </button>
             </nav>
+            <a href="/write-options" className="text-gray-300 hover:text-white transition-colors">Write Options</a>
+            <div className="relative group">
+              <button className="text-gray-300 hover:text-white transition-colors px-6 py-2 rounded-lg font-medium">
+                Simple Trade
+              </button>
+              <div className="absolute hidden group-hover:block bg-gray-800 text-white rounded-lg shadow-lg py-2 z-10">
+                <a href="/simple-trade/crypto" className="block px-4 py-2 hover:bg-gray-700">Crypto</a>
+                <a href="/simple-trade/forex" className="block px-4 py-2 hover:bg-gray-700">Forex</a>
+                <a href="/simple-trade/stocks" className="block px-4 py-2 hover:bg-gray-700">Stocks</a>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -48,7 +59,7 @@ const OptionsDAppMain = () => {
               </span>
             </h1>
             <p className="text-xl md:text-2xl text-gray-300 max-w-4xl mx-auto leading-relaxed">
-              The world's most advanced DeFi options platform. Trade crypto, forex, and stock options 24/7 
+              The world&apos;s most advanced DeFi options platform. Trade crypto, forex, and stock options 24/7 
               with professional-grade analytics, automated risk management, and gas-optimized execution.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
@@ -235,7 +246,7 @@ const OptionsDAppMain = () => {
                 Built on 1inch Protocol for maximum efficiency
               </p>
               <p className="text-gray-300 text-lg leading-relaxed">
-                Our integration with 1inch's battle-tested infrastructure delivers unprecedented gas savings 
+                Our integration with 1inch&apos;s battle-tested infrastructure delivers unprecedented gas savings 
                 while maintaining the highest security standards.
               </p>
               <div className="bg-gradient-to-r from-green-900/30 to-blue-900/30 rounded-lg p-6 border border-green-500/20">
