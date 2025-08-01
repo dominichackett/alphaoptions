@@ -9,10 +9,41 @@ import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+// 1inch Limit Order Protocol Interfaces
+interface ILimitOrderProtocol {
+    struct Order {
+        uint256 salt;
+        address makerAsset;
+        address takerAsset;
+        address maker;
+        address receiver;
+        address allowedSender;
+        uint256 makingAmount;
+        uint256 takingAmount;
+        uint256 offsets;
+        bytes interactions;
+    }
+
+    function fillOrder(
+        Order calldata order,
+        bytes calldata signature,
+        bytes calldata interaction,
+        uint256 makingAmount,
+        uint256 takingAmount,
+        uint256 skipPermitAndThresholdAmount
+    ) external payable returns (uint256 actualMakingAmount, uint256 actualTakingAmount, bytes32 orderHash);
+
+    function cancelOrder(Order calldata order) external returns (uint256 orderRemaining, bytes32 orderHash);
+    
+    function remaining(bytes32 orderHash) external view returns (uint256);
+    
+    function remainingRaw(bytes32 orderHash) external view returns (uint256);
+}
+
 /**
- * @title OptionsProtocol
- * @dev Core options protocol integrating with 1inch Limit Order Protocol
- * Enables multi-asset options trading (crypto, forex, stocks) with gas-optimized execution
+ * @title OptionsProtocol - 1inch Integration
+ * @dev Advanced options protocol using 1inch Limit Order Protocol for execution
+ * Enables multi-asset options trading with 24/7 availability and professional features
  */
 contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
     using SafeERC20 for IERC20;
@@ -23,9 +54,12 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
     bytes32 public constant LIQUIDATOR_ROLE = keccak256("LIQUIDATOR_ROLE");
     
-    // EIP-712 Type Hashes
+    // 1inch Integration
+    ILimitOrderProtocol public immutable inchProtocol;
+    
+    // EIP-712 Type Hashes for Options
     bytes32 private constant OPTION_ORDER_TYPEHASH = keccak256(
-        "OptionOrder(address maker,address taker,address makerAsset,address takerAsset,uint256 makerAmount,uint256 takerAmount,uint256 salt,uint256 expiration,bytes predicate,bytes makerAssetData,bytes takerAssetData,bytes interaction)"
+        "OptionOrder(address maker,address taker,address makerAsset,address takerAsset,uint256 makerAmount,uint256 takerAmount,uint256 salt,uint256 expiration,bytes optionData,bytes interaction)"
     );
 
     // ============ Enums ============
@@ -45,9 +79,7 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
         uint256 takerAmount;    // Premium amount
         uint256 salt;           // Unique order identifier
         uint256 expiration;     // Order expiration timestamp
-        bytes predicate;        // Custom conditions
-        bytes makerAssetData;   // Option specifications
-        bytes takerAssetData;   // Additional data
+        bytes optionData;       // Encoded option specifications
         bytes interaction;      // Post-interaction calls
     }
 
@@ -58,12 +90,13 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
         OptionStyle style;      // EUROPEAN or AMERICAN
         uint256 strikePrice;    // Strike price (scaled by 1e18)
         uint256 expiryTime;     // Option expiry timestamp
-        uint256 contractSize;   // Number of units (for stocks: shares/100)
+        uint256 contractSize;   // Number of units
         address oracle;         // Price oracle address
     }
 
     struct OptionPosition {
         bytes32 optionId;       // Unique option identifier
+        bytes32 inchOrderHash;  // 1inch order hash for tracking
         address holder;         // Current option holder
         address writer;         // Option writer (seller)
         OptionSpec spec;        // Option specifications
@@ -73,14 +106,16 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
         bool isExercised;       // Exercise status
         bool isExpired;         // Expiry status
         uint256 createdAt;      // Creation timestamp
+        uint256 inchMakingAmount; // Actual amount from 1inch
+        uint256 inchTakingAmount; // Actual amount from 1inch
     }
 
     // ============ State Variables ============
     
-    mapping(bytes32 => uint256) public cancelledOrFilled;
     mapping(bytes32 => OptionPosition) public options;
     mapping(address => bytes32[]) public userOptions;
     mapping(string => address) public assetOracles;
+    mapping(bytes32 => bool) public cancelledOrders; // Track cancelled 1inch orders
     
     // Contract dependencies
     address public collateralVault;
@@ -98,20 +133,21 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
 
     // ============ Events ============
     
-    event OptionCreated(
+    event OptionCreatedVia1inch(
         bytes32 indexed optionId,
+        bytes32 indexed inchOrderHash,
         address indexed maker,
         address indexed taker,
         OptionSpec spec,
-        uint256 premium,
-        uint256 collateral
+        uint256 actualMaking,
+        uint256 actualTaking
     );
 
-    event OptionFilled(
-        bytes32 indexed orderHash,
+    event InchOrderFilled(
+        bytes32 indexed inchOrderHash,
         bytes32 indexed optionId,
-        address indexed taker,
-        uint256 filledAmount
+        uint256 actualMakingAmount,
+        uint256 actualTakingAmount
     );
 
     event OptionExercised(
@@ -127,27 +163,11 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
         uint256 collateralReleased
     );
 
-    event OrderCancelled(
-        bytes32 indexed orderHash,
+    event InchOrderCancelled(
+        bytes32 indexed inchOrderHash,
+        bytes32 indexed optionId,
         address indexed maker
     );
-
-    // ============ Modifiers ============
-    
-    modifier onlyValidOption(bytes32 optionId) {
-        require(options[optionId].holder != address(0), "Option does not exist");
-        _;
-    }
-
-    modifier notExpired(bytes32 optionId) {
-        require(block.timestamp < options[optionId].spec.expiryTime, "Option expired");
-        _;
-    }
-
-    modifier onlyHolder(bytes32 optionId) {
-        require(options[optionId].holder == msg.sender, "Not option holder");
-        _;
-    }
 
     // ============ Constructor ============
     
@@ -155,110 +175,158 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
         address _admin,
         address _feeRecipient,
         string memory _name,
-        string memory _version
+        string memory _version,
+        address _inchProtocol
     ) EIP712(_name, _version) {
+        require(_inchProtocol != address(0), "Invalid 1inch protocol address");
+        
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(OPERATOR_ROLE, _admin);
+        
+        inchProtocol = ILimitOrderProtocol(_inchProtocol);
         feeRecipient = _feeRecipient;
         _optionCounter = 1;
     }
 
-    // ============ Core Functions ============
+    // ============ Core 1inch Integration Functions ============
     
     /**
-     * @dev Creates and fills an option order
-     * @param order The option order struct
+     * @dev Creates and fills an option order using 1inch Limit Order Protocol
+     * @param optionOrder The option order struct
      * @param signature Maker's signature
-     * @param makerAssetData Encoded option specifications
-     * @param interaction Optional interaction data
+     * @param interaction Optional 1inch interaction data
+     * @param makingAmount Desired making amount (0 for full fill)
+     * @param takingAmount Desired taking amount (0 for full fill)
      */
-    function fillOptionOrder(
-        OptionOrder calldata order,
+    function fillOptionOrderVia1inch(
+        OptionOrder calldata optionOrder,
         bytes calldata signature,
-        bytes calldata makerAssetData,
-        bytes calldata interaction
+        bytes calldata interaction,
+        uint256 makingAmount,
+        uint256 takingAmount
     ) external nonReentrant whenNotPaused returns (bytes32 optionId) {
-        // Validate order
-        bytes32 orderHash = _getOrderHash(order);
-        require(_isValidSignature(order.maker, orderHash, signature), "Invalid signature");
-        require(block.timestamp <= order.expiration, "Order expired");
-        require(cancelledOrFilled[orderHash] == 0, "Order already filled or cancelled");
+        // Validate option order
+        require(block.timestamp <= optionOrder.expiration, "Option order expired");
+        require(!cancelledOrders[_getOptionOrderHash(optionOrder)], "Order cancelled");
         
         // Decode option specifications
-        OptionSpec memory spec = abi.decode(makerAssetData, (OptionSpec));
+        OptionSpec memory spec = abi.decode(optionOrder.optionData, (OptionSpec));
         require(_isValidOptionSpec(spec), "Invalid option specification");
+        
+        // Convert to 1inch order format
+        ILimitOrderProtocol.Order memory inchOrder = _convertToInchOrder(optionOrder);
         
         // Generate unique option ID
         optionId = keccak256(abi.encodePacked(
-            orderHash,
+            _getOptionOrderHash(optionOrder),
             block.timestamp,
             _optionCounter++
         ));
         
+        // Execute order through 1inch Protocol
+        (uint256 actualMakingAmount, uint256 actualTakingAmount, bytes32 inchOrderHash) = 
+            inchProtocol.fillOrder(
+                inchOrder,
+                signature,
+                interaction,
+                makingAmount,
+                takingAmount,
+                0 // No skip permit
+            );
+        
+        require(actualMakingAmount > 0 && actualTakingAmount > 0, "1inch execution failed");
+        
         // Determine taker (buyer)
-        address taker = order.taker == address(0) ? msg.sender : order.taker;
+        address taker = optionOrder.taker == address(0) ? msg.sender : optionOrder.taker;
         require(taker == msg.sender, "Invalid taker");
         
-        // Calculate required collateral
-        uint256 requiredCollateral = _calculateRequiredCollateral(spec, order.makerAmount);
-        require(order.makerAmount >= requiredCollateral, "Insufficient collateral");
-        
-        // Transfer premium from taker to maker
-        uint256 fee = (order.takerAmount * protocolFee) / 10000;
-        uint256 netPremium = order.takerAmount - fee;
-        
-        IERC20(order.takerAsset).safeTransferFrom(taker, order.maker, netPremium);
-        if (fee > 0) {
-            IERC20(order.takerAsset).safeTransferFrom(taker, feeRecipient, fee);
-        }
-        
-        // Lock collateral from maker
-        IERC20(order.makerAsset).safeTransferFrom(order.maker, collateralVault, order.makerAmount);
+        // Calculate protocol fee
+        uint256 fee = (actualTakingAmount * protocolFee) / 10000;
         
         // Create option position
         options[optionId] = OptionPosition({
             optionId: optionId,
+            inchOrderHash: inchOrderHash,
             holder: taker,
-            writer: order.maker,
+            writer: optionOrder.maker,
             spec: spec,
-            premium: order.takerAmount,
-            collateral: order.makerAmount,
-            collateralToken: order.makerAsset,
+            premium: actualTakingAmount,
+            collateral: actualMakingAmount,
+            collateralToken: optionOrder.makerAsset,
             isExercised: false,
             isExpired: false,
-            createdAt: block.timestamp
+            createdAt: block.timestamp,
+            inchMakingAmount: actualMakingAmount,
+            inchTakingAmount: actualTakingAmount
         });
         
         // Update tracking
         userOptions[taker].push(optionId);
-        userOptions[order.maker].push(optionId);
-        cancelledOrFilled[orderHash] = order.takerAmount;
+        userOptions[optionOrder.maker].push(optionId);
         
-        // Execute interaction if provided
-        if (interaction.length > 0) {
-            _executeInteraction(interaction, optionId);
+        // Lock collateral in vault
+        _lockCollateralInVault(optionId, optionOrder.maker, spec, actualMakingAmount);
+        
+        // Handle protocol fee
+        if (fee > 0) {
+            IERC20(optionOrder.takerAsset).safeTransferFrom(taker, feeRecipient, fee);
         }
         
-        emit OptionCreated(optionId, order.maker, taker, spec, order.takerAmount, order.makerAmount);
-        emit OptionFilled(orderHash, optionId, taker, order.takerAmount);
+        emit OptionCreatedVia1inch(
+            optionId, 
+            inchOrderHash, 
+            optionOrder.maker, 
+            taker, 
+            spec, 
+            actualMakingAmount, 
+            actualTakingAmount
+        );
+        
+        emit InchOrderFilled(inchOrderHash, optionId, actualMakingAmount, actualTakingAmount);
         
         return optionId;
     }
 
     /**
-     * @dev Exercises an option (American style can be called anytime, European only at expiry)
+     * @dev Cancels an option order through 1inch Protocol
+     * @param optionOrder The option order to cancel
+     */
+    function cancelOptionOrder(OptionOrder calldata optionOrder) 
+        external 
+        nonReentrant 
+        whenNotPaused 
+    {
+        require(optionOrder.maker == msg.sender, "Only maker can cancel");
+        
+        bytes32 orderHash = _getOptionOrderHash(optionOrder);
+        require(!cancelledOrders[orderHash], "Already cancelled");
+        
+        // Convert to 1inch order format
+        ILimitOrderProtocol.Order memory inchOrder = _convertToInchOrder(optionOrder);
+        
+        // Cancel through 1inch Protocol
+        (uint256 orderRemaining, bytes32 inchOrderHash) = inchProtocol.cancelOrder(inchOrder);
+        
+        // Mark as cancelled
+        cancelledOrders[orderHash] = true;
+        
+        emit InchOrderCancelled(inchOrderHash, bytes32(0), msg.sender);
+    }
+
+    /**
+     * @dev Exercise an option position
      * @param optionId The option to exercise
      */
     function exerciseOption(bytes32 optionId) 
         external 
         nonReentrant 
         whenNotPaused 
-        onlyValidOption(optionId)
-        onlyHolder(optionId)
-        notExpired(optionId)
     {
         OptionPosition storage position = options[optionId];
+        require(position.holder == msg.sender, "Not option holder");
         require(!position.isExercised, "Already exercised");
+        require(!position.isExpired, "Option expired");
+        require(block.timestamp < position.spec.expiryTime, "Past expiry");
         
         // Check if option can be exercised based on style
         if (position.spec.style == OptionStyle.EUROPEAN) {
@@ -277,27 +345,14 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
         // Mark as exercised
         position.isExercised = true;
         
-        // Execute settlement through settlement engine
+        // Execute settlement
         _executeSettlement(optionId, payout, currentPrice);
         
         emit OptionExercised(optionId, position.holder, payout, block.timestamp);
     }
 
     /**
-     * @dev Cancels an unfilled order
-     * @param orderHash Hash of the order to cancel
-     */
-    function cancelOrder(bytes32 orderHash) external {
-        require(cancelledOrFilled[orderHash] == 0, "Order already filled or cancelled");
-        
-        // Mark as cancelled (set to max value to distinguish from filled)
-        cancelledOrFilled[orderHash] = type(uint256).max;
-        
-        emit OrderCancelled(orderHash, msg.sender);
-    }
-
-    /**
-     * @dev Expires options that have passed their expiry time
+     * @dev Expire options that have passed their expiry time
      * @param optionIds Array of option IDs to expire
      */
     function expireOptions(bytes32[] calldata optionIds) external {
@@ -337,17 +392,17 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
     }
 
     /**
-     * @dev Calculate option hash for signature verification
+     * @dev Get 1inch order hash for option order
      */
-    function getOrderHash(OptionOrder calldata order) external view returns (bytes32) {
-        return _getOrderHash(order);
+    function getOptionOrderHash(OptionOrder calldata order) external view returns (bytes32) {
+        return _getOptionOrderHash(order);
     }
 
     /**
-     * @dev Check if order is filled or cancelled
+     * @dev Check if 1inch order is still valid/unfilled
      */
-    function isOrderValid(bytes32 orderHash) external view returns (bool) {
-        return cancelledOrFilled[orderHash] == 0;
+    function getInchOrderRemaining(bytes32 inchOrderHash) external view returns (uint256) {
+        return inchProtocol.remaining(inchOrderHash);
     }
 
     /**
@@ -378,7 +433,27 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
 
     // ============ Internal Functions ============
     
-    function _getOrderHash(OptionOrder calldata order) internal view returns (bytes32) {
+    function _convertToInchOrder(OptionOrder calldata optionOrder) 
+        internal 
+        view 
+        returns (ILimitOrderProtocol.Order memory) 
+    {
+        // Convert option order to 1inch limit order format
+        return ILimitOrderProtocol.Order({
+            salt: optionOrder.salt,
+            makerAsset: optionOrder.makerAsset,
+            takerAsset: optionOrder.takerAsset,
+            maker: optionOrder.maker,
+            receiver: optionOrder.taker == address(0) ? address(0) : optionOrder.taker,
+            allowedSender: optionOrder.taker == address(0) ? address(0) : optionOrder.taker,
+            makingAmount: optionOrder.makerAmount,
+            takingAmount: optionOrder.takerAmount,
+            offsets: 0, // No predicated/getter functions for basic options
+            interactions: optionOrder.interaction
+        });
+    }
+
+    function _getOptionOrderHash(OptionOrder calldata order) internal view returns (bytes32) {
         return _hashTypedDataV4(keccak256(abi.encode(
             OPTION_ORDER_TYPEHASH,
             order.maker,
@@ -389,15 +464,9 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
             order.takerAmount,
             order.salt,
             order.expiration,
-            keccak256(order.predicate),
-            keccak256(order.makerAssetData),
-            keccak256(order.takerAssetData),
+            keccak256(order.optionData),
             keccak256(order.interaction)
         )));
-    }
-
-    function _isValidSignature(address signer, bytes32 hash, bytes calldata signature) internal pure returns (bool) {
-        return hash.recover(signature) == signer;
     }
 
     function _isValidOptionSpec(OptionSpec memory spec) internal view returns (bool) {
@@ -412,13 +481,35 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
         return assetOracles[spec.underlying] == spec.oracle;
     }
 
-    function _calculateRequiredCollateral(OptionSpec memory spec, uint256 providedAmount) internal view returns (uint256) {
+    function _lockCollateralInVault(
+        bytes32 optionId,
+        address maker,
+        OptionSpec memory spec,
+        uint256 collateralAmount
+    ) internal {
+        require(collateralVault != address(0), "Collateral vault not set");
+        
+        (bool success,) = collateralVault.call(
+            abi.encodeWithSignature(
+                "lockCollateral(bytes32,address,address,uint256,uint256,uint8)",
+                optionId,
+                maker,
+                options[optionId].collateralToken,
+                collateralAmount,
+                _calculateRequiredCollateral(spec),
+                0 // ISOLATED margin type for basic implementation
+            )
+        );
+        require(success, "Collateral locking failed");
+    }
+
+    function _calculateRequiredCollateral(OptionSpec memory spec) internal pure returns (uint256) {
         if (spec.optionType == OptionType.CALL) {
             // For calls, collateral is the underlying asset amount
             return spec.contractSize;
         } else {
             // For puts, collateral is strike price * contract size
-            return (spec.strikePrice * spec.contractSize * minCollateralRatio) / (100 * 1e18);
+            return (spec.strikePrice * spec.contractSize) / 1e18;
         }
     }
 
@@ -461,18 +552,6 @@ contract OptionsProtocol is ReentrancyGuard, AccessControl, Pausable, EIP712 {
             abi.encodeWithSignature("releaseCollateral(bytes32)", optionId)
         );
         require(success, "Collateral release failed");
-    }
-
-    function _executeInteraction(bytes calldata interaction, bytes32 optionId) internal {
-        // Decode and execute post-interaction calls
-        // This allows for complex strategies and integrations
-        (address target, bytes memory callData) = abi.decode(interaction, (address, bytes));
-        
-        require(target != address(this), "Cannot call self");
-        require(target.code.length > 0, "Target not a contract");
-        
-        (bool success,) = target.call(callData);
-        require(success, "Interaction failed");
     }
 
     function _getImpliedVolatility(string memory underlying) internal view returns (uint256) {

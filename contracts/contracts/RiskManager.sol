@@ -1140,7 +1140,7 @@ contract RiskManager is ReentrancyGuard, AccessControl, Pausable {
         assetRiskPaused[asset] = paused;
     }
 
-    function activateEmergencyRiskMode(string calldata reason) 
+    /*function activateEmergencyRiskMode(string calldata reason) 
         external 
         onlyRole(EMERGENCY_ROLE) 
     {
@@ -1150,7 +1150,7 @@ contract RiskManager is ReentrancyGuard, AccessControl, Pausable {
     function deactivateEmergencyRiskMode() external onlyRole(EMERGENCY_ROLE) {
         emergencyRiskMode = false;
     }
-
+*/
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
     }
